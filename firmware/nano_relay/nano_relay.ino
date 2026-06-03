@@ -1,18 +1,19 @@
 // =====================================================================
-//  Nano 继电器控制器  v1.1
+//  Nano 继电器控制器  v1.2
 //  适用:OpenCV 项目 Pi → USB 串口 → Arduino Nano → 5V 继电器 → 外设
 //
 //  串口协议(以 \n 或 \r 结尾的行):
 //    Pi → Nano:
 //      "PIN <n> <HIGH|LOW> <ms>"   在数字脚 <n> 拉到指定电平,持续 <ms> 毫秒后自动释放
 //                                  非阻塞,多通道可并行,新命令会覆盖同脚的旧脉冲
+//      "SET <n> <HIGH|LOW>"        在数字脚 <n> 保持指定电平,直到收到 STOP
 //      "STOP [n]"                  立即停掉所有脉冲;带 n 则只停该脚
 //      "STATUS"                    打印 D2..D12 当前电平(0/1)
 //      "PING"                      心跳测试,回 PONG
 //      "VER"                       回固件版本
 //      "HELP"                      回命令清单
 //    Nano → Pi:
-//      "NANO_RELAY 1.1"            上电版本
+//      "NANO_RELAY 1.2"            上电版本
 //      "READY"                     上电就绪
 //      "OK" / "OK STOP" / "OK STOP <n>"   命令接受
 //      "PONG" / "STATUS D2=1 ..." / "HELP ..."
@@ -25,9 +26,12 @@
 //    - 错误码细分
 //    - 上电主动发版本 + READY,方便 Pi 端握手
 //
+//  v1.2 相对 v1.1 的改动:
+//    - 增加 SET 命令,支持继电器按业务状态持续吸合,睁眼后再 STOP 释放
+//
 //  极性配置(改继电器模块极性时,只动下面 ACTIVE_LOW 一行):
-//    ACTIVE_LOW = true  → 多数 5V 继电器模块(Nano 拉 LOW = 吸合),本项目默认
-//    ACTIVE_LOW = false → 少数 active_high 模块
+//    ACTIVE_LOW = true  → Nano 拉 LOW = 吸合
+//    ACTIVE_LOW = false → Nano 拉 HIGH = 吸合
 // =====================================================================
 
 const long BAUD = 9600;
@@ -36,7 +40,7 @@ const uint8_t MAX_PIN = 12;
 const unsigned long MAX_MS = 60000UL;     // 单次脉冲上限 60s
 const unsigned long HEARTBEAT_MS = 500;   // LED 心跳周期
 
-const bool ACTIVE_LOW = true;
+const bool ACTIVE_LOW = false;
 const int IDLE_LEVEL = ACTIVE_LOW ? HIGH : LOW;
 
 // 每脚一个脉冲记录(index 0..12,只用 2..12)
@@ -47,7 +51,7 @@ struct Pulse {
 Pulse pulses[13];
 
 String buf;
-const char* FW_VER = "NANO_RELAY 1.1";
+const char* FW_VER = "NANO_RELAY 1.2";
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -110,6 +114,7 @@ void handle(String line) {
   line.trim();
 
   if (line.startsWith("PIN "))        { handlePin(line);    return; }
+  if (line.startsWith("SET "))        { handleSet(line);    return; }
   if (line.startsWith("STOP"))        { handleStop(line);   return; }
   if (line == "STATUS")               { handleStatus();     return; }
   if (line == "PING")                 { Serial.println(F("PONG")); return; }
@@ -117,6 +122,23 @@ void handle(String line) {
   if (line == "HELP")                 { handleHelp();       return; }
 
   Serial.println(F("ERR UNKNOWN"));
+}
+
+void handleSet(const String& line) {
+  // 形如 "SET 3 LOW"
+  int s1 = line.indexOf(' ', 4);
+  if (s1 < 0) { Serial.println(F("ERR FORMAT")); return; }
+
+  int pin = line.substring(4, s1).toInt();
+  String level = line.substring(s1 + 1);
+  level.trim();
+
+  if (pin < MIN_PIN || pin > MAX_PIN) { Serial.println(F("ERR PIN")); return; }
+  if (level != "HIGH" && level != "LOW") { Serial.println(F("ERR LEVEL")); return; }
+
+  int levelVal = (level == "HIGH") ? HIGH : LOW;
+  holdPin((uint8_t)pin, levelVal);
+  Serial.println(F("OK"));
 }
 
 void handlePin(const String& line) {
@@ -166,8 +188,9 @@ void handleStatus() {
 }
 
 void handleHelp() {
-  Serial.println(F("HELP NANO_RELAY 1.1"));
+  Serial.println(F("HELP NANO_RELAY 1.2"));
   Serial.println(F("  PIN <n> <HIGH|LOW> <ms>   pulse pin n for <ms> ms"));
+  Serial.println(F("  SET <n> <HIGH|LOW>        hold pin n at level until STOP"));
   Serial.println(F("  STOP [n]                  stop all pulses, or pin n"));
   Serial.println(F("  STATUS                    show D2..D12 levels (0/1)"));
   Serial.println(F("  PING                      reply PONG"));
@@ -182,6 +205,11 @@ void triggerPulse(uint8_t pin, int level, unsigned long ms) {
   digitalWrite(pin, level);
   pulses[pin].active = true;
   pulses[pin].endMs = millis() + ms;
+}
+
+void holdPin(uint8_t pin, int level) {
+  digitalWrite(pin, level);
+  pulses[pin].active = false;
 }
 
 void stopPin(uint8_t pin) {

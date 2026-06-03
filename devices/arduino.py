@@ -2,6 +2,8 @@
 
 协议(文本,易调试):
     Pi → Nano:   "PIN 3 HIGH 2000\n"   pin=D3 高电平 2000ms 后自动恢复
+                 "SET 3 HIGH\n"        pin=D3 保持高电平,直到 STOP
+                 "STOP 3\n"            释放 D3
     Nano → Pi:   "OK\n"  /  "ERR ...\n"
 
 同一块 Nano 可以挂多个外设 - yaml 里两条路由用同一 port、不同 pin 即可,
@@ -113,10 +115,28 @@ class ArduinoDevice(Device):
                 logger.error(f"[arduino:{self.name}] 串口写失败: {exc}")
                 return "EXC"
 
+    def _active_level(self) -> str:
+        return "HIGH" if self.active_high else "LOW"
+
     def trigger(self, payload: Optional[Dict[str, Any]] = None) -> None:
+        state = self._param(payload, "state", None)
+        if isinstance(state, bool):
+            state = "on" if state else "off"
+        if state is not None:
+            state_text = str(state).strip().lower()
+            if state_text in {"on", "1", "true", "enable", "enabled"}:
+                resp = self._send(f"SET {self.pin} {self._active_level()}")
+                if resp.startswith("ERR UNKNOWN"):
+                    # 兼容未升级到 SET 协议的旧固件：最多保持 60 秒。
+                    self._send(f"PIN {self.pin} {self._active_level()} 60000")
+                return
+            if state_text in {"off", "0", "false", "disable", "disabled"}:
+                self._send(f"STOP {self.pin}")
+                return
+
         pulse = float(self._param(payload, "pulse", self.default_pulse))
         pulse = max(0.0, min(pulse, 60.0))  # 上限 60s
-        level = "HIGH" if self.active_high else "LOW"
+        level = self._active_level()
         ms = int(pulse * 1000)
         # Nano v1.1+ 用 millis() 调度脉冲,这里发完命令 Nano 立即回 OK (<100ms)
         # 实际的 pulse 时长在 Nano 端后台跑,worker 线程立即释放

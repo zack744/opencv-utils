@@ -21,7 +21,6 @@ FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarke
 # --------------------- 阈值 --------------------- #
 CLOSED_EYE_DISTANCE = 0.015
 MIN_CLOSED_DURATION = 3.0
-SHOCK_COOLDOWN = 2.0
 
 
 def download_models():
@@ -42,8 +41,9 @@ class ClosedEyeApp(BaseCameraApp):
         self.eye_closed_start_time = 0
         self.last_eye_state = False
         self.is_closed = False
-        self.last_shock_time = 0
         self.eye_closed_duration = 0.0
+        self.shock_active = False
+        self.shock_state_synced = False
         self.right_dist = None
         self.left_dist = None
         self.face_detected = False
@@ -85,6 +85,19 @@ class ClosedEyeApp(BaseCameraApp):
             p = face[idx]
             cv2.circle(image, (int(p.x * w), int(p.y * h)), 6, (0, 255, 255), -1)
 
+    def _set_shock_state(self, enabled: bool, duration: float = 0.0) -> None:
+        if self.shock_state_synced and self.shock_active == enabled:
+            return
+
+        self.shock_active = enabled
+        self.shock_state_synced = True
+        self.emit_action(
+            "shock",
+            state="on" if enabled else "off",
+            duration=duration,
+            _bypass_cooldown=True,
+        )
+
     def process_frame(self, image, frame_count):
         if (frame_count - self.last_face_frame) >= 2 or self.last_face_landmarks is None:
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -109,35 +122,31 @@ class ClosedEyeApp(BaseCameraApp):
             if self.last_eye_state:
                 self.eye_closed_duration = time.time() - self.eye_closed_start_time
                 if self.eye_closed_duration >= MIN_CLOSED_DURATION:
-                    now = time.time()
-                    if now - self.last_shock_time >= SHOCK_COOLDOWN:
-                        self.is_closed = True
-                        self.last_shock_time = now
-                        # 触发外设(由 config/devices.yaml 决定接谁; 未配置则静默)
-                        self.emit_action("shock", duration=self.eye_closed_duration)
+                    self.is_closed = True
+                    # 闭眼达到阈值后才接通继电器；持续闭眼期间不重复刷命令。
+                    self._set_shock_state(True, self.eye_closed_duration)
             else:
                 self.eye_closed_start_time = time.time()
                 self.is_closed = False
                 self.eye_closed_duration = 0.0
+                self._set_shock_state(False)
         else:
             self.eye_closed_start_time = time.time()
             self.is_closed = False
             self.eye_closed_duration = 0.0
+            # 睁眼/无人脸都释放继电器。首次启动也会同步一次 OFF，避免硬件残留在吸合态。
+            self._set_shock_state(False)
         self.last_eye_state = current_closed
 
         status = self._build_status()
         return image, status
 
     def _build_status(self):
-        cooldown_remaining = 0.0
-        if self.last_shock_time > 0:
-            cooldown_remaining = max(0.0, SHOCK_COOLDOWN - (time.time() - self.last_shock_time))
-
         if self.is_closed:
             state, color, main_text, sub_text = (
                 "闭眼触发！", "red",
                 f"已闭眼 {self.eye_closed_duration:.1f}s",
-                f"冷却 {cooldown_remaining:.1f}s",
+                "继电器已接通，睁眼后断开",
             )
         elif self.eye_closed_duration > 0:
             state, color, main_text, sub_text = (
@@ -165,8 +174,6 @@ class ClosedEyeApp(BaseCameraApp):
             stats.append(("左眼距离", f"{self.left_dist:.4f}"))
         stats.append(("阈值", f"{CLOSED_EYE_DISTANCE:.4f}"))
         stats.append(("面部", "已锁定" if self.face_detected else "未检测"))
-        if cooldown_remaining > 0:
-            stats.append(("冷却剩余", f"{cooldown_remaining:.1f}s"))
 
         progress = min(1.0, self.eye_closed_duration / MIN_CLOSED_DURATION)
         return {

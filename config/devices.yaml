@@ -23,9 +23,9 @@ closed_eye:
     port: /dev/ttyUSB0       # Pi 上;Windows 测试改 COM3
     baud: 9600
     pin: 3                   # Nano D3 → 继电器A IN → 按摩仪 5V 供电
-    pulse: 8.0               # 给按摩仪供电 8 秒(看你按摩仪的循环)
-    active_high: false       # ⚠️ 多数继电器模块是 active_low,看你板子
-    cooldown: 60.0
+    pulse: 8.0               # 旧脉冲模式兜底;闭眼监控现在用 state=on/off 持续控制
+    active_high: true        # 你的继电器板上电 HIGH 会吸合,所以闭眼时发 HIGH
+    cooldown: 0.0            # 状态切换不能被冷却拦住,睁眼要立刻断开
 
 # ============ 咬手指 → 提醒 (还没接硬件,留 dummy) ============
 bite_finger:

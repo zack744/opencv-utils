@@ -99,13 +99,15 @@ class ActionDispatcher:
             logger.debug(f"无路由: {key} (忽略)")
             return False
 
+        bypass_cooldown = bool(payload.pop("_bypass_cooldown", False))
         now = time.time()
-        if now - route.last_fire < route.cooldown:
+        if not bypass_cooldown and now - route.last_fire < route.cooldown:
             logger.debug(
                 f"路由 {key} 冷却中 (剩余 {route.cooldown - (now - route.last_fire):.2f}s)"
             )
             return False
-        route.last_fire = now
+        if not bypass_cooldown:
+            route.last_fire = now
 
         ev = _Event(mode=mode, action=action, payload=dict(payload), ts=now)
         try:
