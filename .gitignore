@@ -1,0 +1,62 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# ---------- 测试 / 覆盖率 ----------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+coverage.xml
+*.cover
+
+# ---------- 类型 / Lint ----------
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# ---------- IDE / 编辑器 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------- 项目运行时产物 ----------
+# 录制产物 / 临时帧(三个 app 都有 recordings/)
+*/recordings/
+# 日志
+*.log
+logs/
+
+# ---------- 环境 / 凭据 ----------
+.env
+.env.local
+*.local
+config/local_*.yaml
+
+# ---------- OS ----------
+desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 其它 ----------
+*.bak
+*.tmp
+*.pid

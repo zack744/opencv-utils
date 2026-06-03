@@ -1,0 +1,14 @@
+flask
+opencv-python
+mediapipe
+numpy
+pyyaml
+
+# Pi USB → Arduino Nano 串口(全平台都装,Nano 没插也只会初始化失败 → 自动降级 dummy)
+pyserial
+
+# 树莓派外设(Windows 上 pip 会失败,这是预期的 —— 代码会自动降级为 dummy)
+# 在树莓派上执行: pip install gpiozero lgpio
+# Windows / Mac 上无需安装
+gpiozero; platform_system == "Linux"
+lgpio; platform_system == "Linux"
