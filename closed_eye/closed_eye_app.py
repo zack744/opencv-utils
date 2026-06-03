@@ -9,8 +9,7 @@ import numpy as np
 
 from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions, RunningMode
 from mediapipe.tasks import python
-from mediapipe import Image as MPImage
-from mediapipe.tasks.python.vision.core import image as vision_image
+import mediapipe as mp
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from common.base_app import BaseCameraApp
@@ -89,7 +88,7 @@ class ClosedEyeApp(BaseCameraApp):
     def process_frame(self, image, frame_count):
         if (frame_count - self.last_face_frame) >= 2 or self.last_face_landmarks is None:
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            mp_img = MPImage(image_format=vision_image.ImageFormat.SRGB, data=rgb)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = self.detector.detect(mp_img)
             if result and result.face_landmarks:
                 self.last_face_landmarks = result.face_landmarks[0]

@@ -13,14 +13,21 @@ Web 服务通过这些方法读取状态和视频帧:
     - start_recording() / stop_recording()
 """
 
+import logging
 import os
+import shutil
+import subprocess
+import sys
 import time
 import threading
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import cv2
+import numpy as np
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CAMERA_SOURCE = 0
 REMOTE_CONNECT_RETRIES = 3
@@ -30,6 +37,152 @@ OUTPUT_DIR = "recordings"
 VIDEO_FPS = 20.0
 VIDEO_SIZE = (640, 480)
 VIDEO_FOURCC = "XVID"
+
+# 采集层目标 FPS。参考 web_nano_app 项目在同一台 Pi 上用的就是 15。
+# 设高了 USB camera 在 YUYV/MJPG 上会被驱动自动降帧,反而抖动。
+CAMERA_CAPTURE_FPS = 15
+
+# 是否在 Linux 上偏好 V4L2 后端(参考项目用的就是这个)。
+# Pi OS Bookworm 上 apt 装的 opencv 默认会优先选 GStreamer,
+# 而 GStreamer pipeline 没配好就会出现 "isOpened=True 但 read 拿不到帧" 的黑屏现象。
+PREFER_V4L2_ON_LINUX = True
+
+# 树莓派排线 CSI 摄像头兜底后端。它通过 rpicam-vid/libcamera-vid 输出 MJPEG,
+# 再用 OpenCV 解码,避开 Picamera2 Python 版本绑定和 OpenCV GStreamer 编译要求。
+RPICAM_SOURCE_NAMES = {"rpicam", "libcamera", "csi", "picam", "picamera"}
+REMOTE_SOURCE_PREFIXES = ("http://", "https://", "rtsp://", "rtmp://", "tcp://", "udp://")
+
+
+class RpicamMjpegCapture:
+    """Small VideoCapture-compatible wrapper for Raspberry Pi CSI cameras."""
+
+    def __init__(self, width=640, height=480, fps=15, camera=0, read_timeout=2.0):
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
+        self.camera = int(camera)
+        self.read_timeout = float(read_timeout)
+        self._proc = None
+        self._thread = None
+        self._lock = threading.Condition()
+        self._latest_frame = None
+        self._seq = 0
+        self._last_read_seq = 0
+        self._closed = False
+        self._last_error = None
+        self._start()
+
+    @property
+    def last_error(self):
+        return self._last_error
+
+    def _find_binary(self):
+        configured = os.environ.get("RPICAM_BIN")
+        if configured:
+            return configured
+        return shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
+
+    def _start(self):
+        binary = self._find_binary()
+        if not binary:
+            self._last_error = "找不到 rpicam-vid/libcamera-vid"
+            return
+
+        cmd = [
+            binary,
+            "--timeout", "0",
+            "--nopreview",
+            "--codec", "mjpeg",
+            "--width", str(self.width),
+            "--height", str(self.height),
+            "--framerate", str(self.fps),
+            "--camera", str(self.camera),
+            "-o", "-",
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except Exception as exc:
+            self._last_error = f"启动 rpicam 失败: {exc}"
+            self._proc = None
+            return
+
+        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._thread.start()
+
+    def _reader_loop(self):
+        buf = bytearray()
+        try:
+            while not self._closed and self._proc and self._proc.poll() is None:
+                if self._proc.stdout is None:
+                    break
+                chunk = self._proc.stdout.read(4096)
+                if not chunk:
+                    time.sleep(0.01)
+                    continue
+                buf.extend(chunk)
+
+                while True:
+                    start = buf.find(b"\xff\xd8")
+                    if start < 0:
+                        if len(buf) > 1024 * 1024:
+                            buf.clear()
+                        break
+                    end = buf.find(b"\xff\xd9", start + 2)
+                    if end < 0:
+                        if start > 0:
+                            del buf[:start]
+                        break
+
+                    jpeg = bytes(buf[start:end + 2])
+                    del buf[:end + 2]
+                    arr = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if arr is None:
+                        continue
+                    with self._lock:
+                        self._latest_frame = arr
+                        self._seq += 1
+                        self._lock.notify_all()
+        except Exception as exc:
+            self._last_error = f"读取 rpicam 输出失败: {exc}"
+
+    def isOpened(self):
+        return bool(self._proc and self._proc.poll() is None and not self._closed)
+
+    def read(self):
+        deadline = time.time() + self.read_timeout
+        with self._lock:
+            while self.isOpened() and self._seq == self._last_read_seq:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._lock.wait(timeout=remaining)
+
+            if self._latest_frame is None:
+                return False, None
+            self._last_read_seq = self._seq
+            return True, self._latest_frame.copy()
+
+    def set(self, *_args):
+        return False
+
+    def release(self):
+        self._closed = True
+        proc = self._proc
+        self._proc = None
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 class BaseCameraApp(ABC):
@@ -134,37 +287,171 @@ class BaseCameraApp(ABC):
         }
 
     def _is_remote_source(self, source):
-        return isinstance(source, str)
+        return isinstance(source, str) and source.strip().lower().startswith(REMOTE_SOURCE_PREFIXES)
+
+    def _is_rpicam_source(self, source):
+        if not isinstance(source, str):
+            return False
+        value = source.strip().lower()
+        name = value.split(":", 1)[0]
+        return name in RPICAM_SOURCE_NAMES
 
     def _describe_source(self, source):
+        if self._is_rpicam_source(source):
+            return f"树莓派 CSI {source}"
         if self._is_remote_source(source):
             return f"远程 {source}"
+        if isinstance(source, str) and source.startswith("/dev/"):
+            return f"本地 {source}"
         return f"本地 #{source}"
 
     def _connect_camera(self, source):
+        if self._is_rpicam_source(source):
+            return self._connect_rpicam_camera(source)
+        if self._is_remote_source(source):
+            return self._connect_remote_camera(source)
+        return self._connect_local_camera(source)
+
+    def _connect_rpicam_camera(self, source):
+        camera = os.environ.get("RPICAM_CAMERA")
+        if camera is None and isinstance(source, str) and ":" in source:
+            camera = source.split(":", 1)[1]
+        try:
+            camera_index = int(camera) if camera is not None and str(camera).strip() else 0
+        except ValueError:
+            camera_index = 0
+
+        cap = RpicamMjpegCapture(
+            width=int(os.environ.get("CAM_WIDTH", str(VIDEO_SIZE[0]))),
+            height=int(os.environ.get("CAM_HEIGHT", str(VIDEO_SIZE[1]))),
+            fps=int(os.environ.get("CAM_FPS", str(CAMERA_CAPTURE_FPS))),
+            camera=camera_index,
+            read_timeout=float(os.environ.get("CAM_READ_TIMEOUT", "3.0")),
+        )
+        if not cap.isOpened():
+            logger.error("rpicam 摄像头启动失败: %s", cap.last_error)
+            self.camera_status = "disconnected"
+            return cap
+
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            logger.info("rpicam 摄像头连接成功 camera=%s size=%dx%d",
+                        camera_index, frame.shape[1], frame.shape[0])
+            self.camera_status = "ok"
+            return cap
+
+        logger.error("rpicam 已启动但没有读到帧: %s", cap.last_error)
+        self.camera_status = "disconnected"
+        return cap
+
+    def _connect_local_camera(self, source):
+        """打开本地摄像头。
+
+        关键改动(对齐参考项目 web_nano_app):
+        - 在 Linux 上显式优先用 V4L2 后端,避免 OpenCV 自动选到不工作的 GStreamer
+        - 数字 source 自动尝试 `/dev/video{N}` 字符串路径(参考项目正是这么写的)
+        - 设置 FOURCC=MJPG + 显式 FPS,USB camera 在高分辨率下更稳
+        - 不只是 isOpened(),还要真试读一帧,读不到就 release 试下一个候选
+        """
+        candidates = self._build_local_candidates(source)
+
+        last_error = None
+        for dev, backend, backend_name in candidates:
+            try:
+                cap = cv2.VideoCapture(dev, backend) if backend is not None else cv2.VideoCapture(dev)
+            except Exception as exc:
+                last_error = f"VideoCapture 构造异常 dev={dev!r} backend={backend_name}: {exc}"
+                logger.warning(last_error)
+                continue
+
+            if not cap.isOpened():
+                last_error = f"isOpened=False dev={dev!r} backend={backend_name}"
+                logger.warning(last_error)
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                continue
+
+            # 先 MJPG —— USB camera 在高分辨率下 YUYV 会被驱动限到几 fps
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                pass
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_SIZE[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_SIZE[1])
+            cap.set(cv2.CAP_PROP_FPS, CAMERA_CAPTURE_FPS)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            # 验证能真读一帧。很多树莓派失败场景是 isOpened=True 但 read 返回 False
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                logger.info("摄像头连接成功 dev=%r backend=%s size=%dx%d",
+                            dev, backend_name, frame.shape[1], frame.shape[0])
+                self.camera_status = "ok"
+                return cap
+
+            last_error = f"isOpened=True 但 read 失败 dev={dev!r} backend={backend_name}"
+            logger.warning(last_error)
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        logger.error("本地摄像头所有候选均失败 source=%r last_error=%s", source, last_error)
+        self.camera_status = "disconnected"
+        # 返回一个空 VideoCapture,保持 _camera_loop 里现有的 isOpened()/read() 容错路径不崩
+        return cv2.VideoCapture()
+
+    def _build_local_candidates(self, source):
+        """生成 (device, backend, backend_name) 候选列表,按尝试顺序排列。"""
+        is_linux = sys.platform.startswith("linux")
+        v4l2 = cv2.CAP_V4L2 if PREFER_V4L2_ON_LINUX and is_linux else None
+        any_be = cv2.CAP_ANY
+
+        # 字符串路径(/dev/videoN 或其他):直接用,Linux 上优先 V4L2
+        if isinstance(source, str):
+            cands = []
+            if v4l2 is not None and source.startswith("/dev/"):
+                cands.append((source, v4l2, "V4L2"))
+            cands.append((source, any_be, "ANY"))
+            return cands
+
+        # 数字 source:Linux 上扩展成多个候选,先 /dev/videoN+V4L2,再 N+V4L2,再 N+ANY
+        if isinstance(source, int):
+            if is_linux:
+                cands = []
+                if v4l2 is not None:
+                    cands.append((f"/dev/video{source}", v4l2, "V4L2(/dev/video{})".format(source)))
+                    cands.append((source, v4l2, "V4L2(index)"))
+                cands.append((source, any_be, "ANY"))
+                return cands
+            # 非 Linux:保持原有行为
+            return [(source, None, "default")]
+
+        # 其他类型:原样透传
+        return [(source, None, "default")]
+
+    def _connect_remote_camera(self, source):
+        """远程 RTSP / HTTP 流。保留原有重连逻辑,只是从 _connect_camera 拆出来更清楚。"""
         cap = cv2.VideoCapture(source)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_SIZE[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_SIZE[1])
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if self._is_remote_source(source):
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-            for _ in range(REMOTE_CONNECT_RETRIES):
-                if cap.isOpened():
-                    ok, _ = cap.read()
-                    if ok:
-                        self.camera_status = "ok"
-                        return cap
-                time.sleep(REMOTE_RETRY_DELAY)
-                cap.release()
-                cap = cv2.VideoCapture(source)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_SIZE[0])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_SIZE[1])
-            self.camera_status = "disconnected"
-            return cap
-
-        self.camera_status = "ok" if cap.isOpened() else "disconnected"
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        for _ in range(REMOTE_CONNECT_RETRIES):
+            if cap.isOpened():
+                ok, _ = cap.read()
+                if ok:
+                    self.camera_status = "ok"
+                    return cap
+            time.sleep(REMOTE_RETRY_DELAY)
+            cap.release()
+            cap = cv2.VideoCapture(source)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_SIZE[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_SIZE[1])
+        self.camera_status = "disconnected"
         return cap
 
     def _reconnect_camera(self):
@@ -206,7 +493,11 @@ class BaseCameraApp(ABC):
         return False
 
     def _switch_camera(self):
-        if self._is_remote_source(self.current_camera):
+        if (
+            self._is_remote_source(self.current_camera)
+            or self._is_rpicam_source(self.current_camera)
+            or isinstance(self.current_camera, str)
+        ):
             return False
         return self._swap_cap(1 - self.current_camera)
 

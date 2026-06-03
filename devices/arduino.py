@@ -106,6 +106,8 @@ class ArduinoDevice(Device):
                 resp = self._ser.readline().decode("ascii", errors="ignore").strip()
                 if resp.startswith("ERR"):
                     logger.warning(f"[arduino:{self.name}] Nano: {resp}")
+                else:
+                    logger.info(f"[arduino:{self.name}] Nano: {resp}")
                 return resp or "<no resp>"
             except Exception as exc:
                 logger.error(f"[arduino:{self.name}] 串口写失败: {exc}")
@@ -116,8 +118,9 @@ class ArduinoDevice(Device):
         pulse = max(0.0, min(pulse, 60.0))  # 上限 60s
         level = "HIGH" if self.active_high else "LOW"
         ms = int(pulse * 1000)
-        # 时序在 Nano 上完成 - Pi 这边 Nano 做完才回 OK
-        # 所以这里阻塞 ≈ pulse 时长,符合 Device.trigger() 的语义
+        # Nano v1.1+ 用 millis() 调度脉冲,这里发完命令 Nano 立即回 OK (<100ms)
+        # 实际的 pulse 时长在 Nano 端后台跑,worker 线程立即释放
+        # 如果有同 pin 短间隔连发,新脉冲会覆盖同脚的旧脉冲(cooldown 已在外层拦)
         self._send(f"PIN {self.pin} {level} {ms}")
 
     def close(self) -> None:

@@ -10,8 +10,7 @@ import numpy as np
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerOptions
 from mediapipe.tasks import python
-from mediapipe import Image as MPImage
-from mediapipe.tasks.python.vision.core import image as vision_image
+import mediapipe as mp
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from common.base_app import BaseCameraApp
@@ -161,7 +160,7 @@ class BiteFingerApp(BaseCameraApp):
     # ---------- 主处理 ---------- #
     def process_frame(self, image, frame_count):
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        mp_img = MPImage(image_format=vision_image.ImageFormat.SRGB, data=rgb)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
         # 间隔检测
         if (frame_count - self.last_hand_frame) >= 2 or self.last_hand_landmarks is None:

@@ -2,6 +2,8 @@ import argparse
 import atexit
 import importlib.util
 import logging
+import os
+import shutil
 import sys
 import threading
 import time
@@ -42,7 +44,20 @@ MODES = {
 }
 
 DEFAULT_MODE = "closed_eye"
-DEFAULT_SOURCE = None
+
+
+def _default_start_source():
+    configured = os.environ.get("CAMERA_SOURCE") or os.environ.get("DEFAULT_CAMERA_SOURCE")
+    if configured:
+        return configured
+    if sys.platform.startswith("linux") and (
+        shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
+    ):
+        return "rpicam"
+    return None
+
+
+DEFAULT_SOURCE = _default_start_source()
 
 
 def _parse_source(source):
@@ -306,6 +321,7 @@ atexit.register(manager.close)
 if __name__ == "__main__":
     args = parse_args()
     DEFAULT_MODE = args.mode
-    DEFAULT_SOURCE = _parse_source(args.source)
+    if args.source is not None:
+        DEFAULT_SOURCE = _parse_source(args.source)
     manager.ensure_started(DEFAULT_MODE, DEFAULT_SOURCE)
     app.run(host=args.host, port=args.port, threaded=True)

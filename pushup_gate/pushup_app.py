@@ -9,8 +9,7 @@ import numpy as np
 
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
 from mediapipe.tasks import python
-from mediapipe import Image as MPImage
-from mediapipe.tasks.python.vision.core import image as vision_image
+import mediapipe as mp
 
 # 允许 import common.base_app
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -214,7 +213,7 @@ class PushupApp(BaseCameraApp):
         need = ((frame_count - self.last_landmarks_frame) >= 2) or (self.last_landmarks is None)
         if need:
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            mp_img = MPImage(image_format=vision_image.ImageFormat.SRGB, data=rgb)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = self.detector.detect(mp_img)
             if result and result.pose_landmarks:
                 self.last_landmarks = result.pose_landmarks[0]
