@@ -8,10 +8,11 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, abort, jsonify, request, send_from_directory, Response
 
 from devices import build_dispatcher_from_config
 
@@ -19,6 +20,8 @@ from devices import build_dispatcher_from_config
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "web" / "static"
 DEVICES_CONFIG = ROOT / "config" / "devices.yaml"
+RECORDINGS_DIR = ROOT / "recordings"
+RECORDING_EXTS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -281,6 +284,51 @@ def set_pushup_target():
         return jsonify(manager.set_pushup_target(data.get("reps")))
     except Exception as exc:
         return jsonify({"detail": str(exc)}), 400
+
+
+@app.get("/api/recordings")
+def list_recordings():
+    """返回 recordings/ 目录下的视频文件列表(按修改时间倒序)。"""
+    items = []
+    if RECORDINGS_DIR.exists() and RECORDINGS_DIR.is_dir():
+        candidates = [
+            p for p in RECORDINGS_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() in RECORDING_EXTS
+        ]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in candidates:
+            stat = p.stat()
+            encoded = quote(p.name, safe="")
+            items.append({
+                "name": p.name,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "url": f"/api/recordings/{encoded}",
+                "download_url": f"/api/recordings/{encoded}?download=1",
+            })
+    return jsonify({"items": items, "output_dir": str(RECORDINGS_DIR)})
+
+
+@app.get("/api/recordings/<path:filename>")
+def get_recording(filename):
+    """提供录像文件的内联播放与下载。
+
+    - 默认: `Content-Disposition: inline`,前端 <video> 拉流播放;
+            `conditional=True` 自动响应 Range,允许拖进度条。
+    - `?download=1`: `Content-Disposition: attachment`,浏览器保存到本地。
+    """
+    if not filename or filename.startswith(".") or "/" in filename or "\\" in filename:
+        abort(400)
+    target = RECORDINGS_DIR / filename
+    if not target.is_file() or target.suffix.lower() not in RECORDING_EXTS:
+        abort(404)
+    as_attachment = request.args.get("download") in {"1", "true", "yes"}
+    return send_from_directory(
+        str(RECORDINGS_DIR),
+        filename,
+        as_attachment=as_attachment,
+        conditional=True,
+    )
 
 
 def _placeholder_jpeg():

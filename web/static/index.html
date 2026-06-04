@@ -91,6 +91,25 @@
           </div>
           <dl id="statsList" class="stats-list"></dl>
         </section>
+
+        <section class="recordings-block" id="recordingsBlock" aria-label="录像回放">
+          <div class="section-head">
+            <h2>录像回放</h2>
+            <button id="refreshRecordingsBtn" type="button" class="ghost">刷新</button>
+          </div>
+          <div class="recording-player">
+            <video
+              id="recordingPlayer"
+              controls
+              preload="metadata"
+              playsinline
+            ></video>
+            <p id="recordingPlayerHint" class="recording-hint">
+              从下方列表选择一段录像进行回放
+            </p>
+          </div>
+          <ul id="recordingList" class="recording-list"></ul>
+        </section>
       </aside>
     </main>
 

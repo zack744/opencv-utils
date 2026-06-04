@@ -36,7 +36,15 @@ REMOTE_RECONNECT_ON_LOST = True
 OUTPUT_DIR = "recordings"
 VIDEO_FPS = 20.0
 VIDEO_SIZE = (640, 480)
-VIDEO_FOURCC = "XVID"
+# 浏览器能直接 <video> 播放的编码优先,失败回退到老的 XVID/AVI
+# 顺序: ("avc1", ".mp4") -> H.264/MP4,几乎所有浏览器都支持
+#       ("mp4v", ".mp4") -> MPEG-4 Part 2/MP4,大部分浏览器能播
+#       ("XVID", ".avi") -> 最后兜底,浏览器播不了但能下载
+VIDEO_FOURCC_CANDIDATES = (
+    ("avc1", ".mp4"),
+    ("mp4v", ".mp4"),
+    ("XVID", ".avi"),
+)
 
 # 采集层目标 FPS。参考 web_nano_app 项目在同一台 Pi 上用的就是 15。
 # 设高了 USB camera 在 YUYV/MJPG 上会被驱动自动降帧,反而抖动。
@@ -204,6 +212,7 @@ class BaseCameraApp(ABC):
         self.video_writer = None
         self.recording_filename = None
         self.recording_start_time = 0
+        self.recording_codec = None
         self.camera_status = "disconnected"
         self.current_fps = 0
         self.app_state = {}
@@ -589,9 +598,41 @@ class BaseCameraApp(ABC):
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
         ts = time.strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(OUTPUT_DIR, f"recording_{ts}.avi")
-        fourcc = cv2.VideoWriter_fourcc(*VIDEO_FOURCC)
-        self.video_writer = cv2.VideoWriter(filename, fourcc, VIDEO_FPS, VIDEO_SIZE)
+
+        # 按候选编码顺序尝试:H.264 -> MPEG-4 -> XVID
+        # cv2.VideoWriter 在编码器不可用时不会抛异常,要看 isOpened()
+        writer = None
+        filename = None
+        last_codec = None
+        for fourcc_name, ext in VIDEO_FOURCC_CANDIDATES:
+            candidate = os.path.join(OUTPUT_DIR, f"recording_{ts}{ext}")
+            fourcc = cv2.VideoWriter_fourcc(*fourcc_name)
+            w = cv2.VideoWriter(candidate, fourcc, VIDEO_FPS, VIDEO_SIZE)
+            if w.isOpened():
+                writer = w
+                filename = candidate
+                last_codec = fourcc_name
+                logger.info("录像编码就绪 codec=%s file=%s", fourcc_name, candidate)
+                break
+            # 没开成,释放然后继续试下一个
+            try:
+                w.release()
+            except Exception:
+                pass
+            # OpenCV 失败时常常已经创建了空文件,清理掉以免污染列表
+            try:
+                if os.path.exists(candidate) and os.path.getsize(candidate) == 0:
+                    os.remove(candidate)
+            except Exception:
+                pass
+            logger.warning("录像编码不可用 codec=%s,尝试下一候选", fourcc_name)
+
+        if writer is None:
+            logger.error("所有录像编码候选都失败,无法开始录制")
+            return None
+
+        self.video_writer = writer
+        self.recording_codec = last_codec
         self.recording_start_time = time.time()
         self.recording_filename = os.path.abspath(filename)
         self.is_recording = True
@@ -607,6 +648,7 @@ class BaseCameraApp(ABC):
         self.is_recording = False
         filename = self.recording_filename
         self.recording_filename = None
+        self.recording_codec = None
         return filename
 
     def get_latest_frame(self):
@@ -640,6 +682,7 @@ class BaseCameraApp(ABC):
             "recording": self.is_recording,
             "recording_elapsed": elapsed,
             "recording_file": self.recording_filename,
+            "recording_codec": self.recording_codec,
             "output_dir": os.path.abspath(OUTPUT_DIR),
         })
         return status

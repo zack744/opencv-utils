@@ -258,13 +258,14 @@ h1 {
 
 .side-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto;
   gap: 12px;
 }
 
 .status-block,
 .control-block,
-.stats-block {
+.stats-block,
+.recordings-block {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -537,6 +538,164 @@ button.danger.active:hover {
 
 .empty {
   margin: 10px 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+button.ghost {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--line);
+}
+
+button.ghost:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+
+.recordings-block {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.recordings-block .section-head span {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.recording-player {
+  padding: 12px 12px 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.recording-player video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0a0a0a;
+  object-fit: contain;
+  display: block;
+}
+
+.recording-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recording-list {
+  margin: 0;
+  padding: 4px 8px 10px;
+  list-style: none;
+  overflow: auto;
+  max-height: 260px;
+}
+
+.recording-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.recording-row:first-child {
+  border-top: 0;
+}
+
+.recording-row:hover {
+  background: var(--surface-2);
+}
+
+.recording-row[data-active="true"] {
+  background: var(--ink);
+  color: #ffffff;
+}
+
+.recording-info {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.recording-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.005em;
+}
+
+.recording-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.recording-row[data-active="true"] .recording-meta {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.recording-actions {
+  display: inline-flex;
+  align-items: center;
+}
+
+.recording-actions a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.recording-actions a:hover {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+
+.recording-row[data-active="true"] .recording-actions a {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+
+.recording-row[data-active="true"] .recording-actions a:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.recording-empty {
+  margin: 10px 8px;
+  padding: 0;
+  list-style: none;
   color: var(--muted);
   font-size: 13px;
 }

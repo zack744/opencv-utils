@@ -22,11 +22,16 @@ const els = {
   recordBtn: document.querySelector("#recordBtn"),
   recordingTime: document.querySelector("#recordingTime"),
   statsList: document.querySelector("#statsList"),
+  refreshRecordingsBtn: document.querySelector("#refreshRecordingsBtn"),
+  recordingPlayer: document.querySelector("#recordingPlayer"),
+  recordingPlayerHint: document.querySelector("#recordingPlayerHint"),
+  recordingList: document.querySelector("#recordingList"),
   toast: document.querySelector("#toast"),
 };
 
 let currentStatus = null;
 let modes = [];
+let activeRecordingName = null;
 
 function toast(message, tone = "neutral") {
   els.toast.textContent = message;
@@ -71,6 +76,8 @@ function toneFromColor(color) {
 }
 
 function renderStatus(status) {
+  // 抓旧状态做边沿检测 —— 录制从在录 → 停止时,自动刷新录像列表
+  const prevRecording = currentStatus ? currentStatus.recording : null;
   currentStatus = status;
   const tone = toneFromColor(status.state_color);
   els.appTitle.textContent = status.app_title || status.mode_label || "检测系统";
@@ -88,7 +95,8 @@ function renderStatus(status) {
   els.recBadge.classList.toggle("show", Boolean(status.recording));
   els.recordBtn.textContent = status.recording ? "停止录制" : "开始录制";
   els.recordBtn.classList.toggle("active", Boolean(status.recording));
-  els.recordingTime.textContent = status.recording ? `${Number(status.recording_elapsed || 0).toFixed(1)}s` : "";
+  const codec = status.recording_codec ? ` · ${status.recording_codec}` : "";
+  els.recordingTime.textContent = status.recording ? `${Number(status.recording_elapsed || 0).toFixed(1)}s${codec}` : "";
   if (document.activeElement !== els.cameraInput) {
     els.cameraInput.value = status.camera_source_value || "";
   }
@@ -103,6 +111,11 @@ function renderStatus(status) {
   }
   renderModes(status.mode);
   renderStats(status.stats || []);
+
+  // 录制刚结束:延后 700ms 让后端 writer 释放文件句柄,再拉一次录像列表
+  if (prevRecording === true && status.recording === false) {
+    window.setTimeout(fetchRecordings, 700);
+  }
 }
 
 function renderStats(stats) {
@@ -124,6 +137,119 @@ function renderStats(stats) {
     row.append(dt, dd);
     els.statsList.appendChild(row);
   });
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatTime(ts) {
+  if (!ts) return "--";
+  const d = new Date(ts * 1000);
+  if (Number.isNaN(d.getTime())) return "--";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function fetchRecordings() {
+  try {
+    const data = await api("/api/recordings");
+    renderRecordings(data.items || []);
+  } catch (err) {
+    // 录像列表是辅助功能,失败时只在 console 留痕,不打扰主流程
+    // eslint-disable-next-line no-console
+    console.debug("recordings fetch failed:", err.message);
+  }
+}
+
+function renderRecordings(items) {
+  const list = els.recordingList;
+  const player = els.recordingPlayer;
+  const hint = els.recordingPlayerHint;
+
+  // 当前正在播放的录像如果已从列表里消失(被删/重命名),清掉播放器
+  if (activeRecordingName && !items.find((it) => it.name === activeRecordingName)) {
+    activeRecordingName = null;
+    player.removeAttribute("src");
+    try { player.load(); } catch (_) { /* noop */ }
+    hint.textContent = "从下方列表选择一段录像进行回放";
+  }
+
+  list.innerHTML = "";
+
+  if (!items.length) {
+    const empty = document.createElement("li");
+    empty.className = "recording-empty";
+    empty.textContent = "暂无录像文件，点击「开始录制」录制一段试试";
+    list.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const li = document.createElement("li");
+    li.className = "recording-row";
+    li.dataset.active = item.name === activeRecordingName ? "true" : "false";
+    li.title = "点击回放";
+
+    const info = document.createElement("div");
+    info.className = "recording-info";
+    const name = document.createElement("div");
+    name.className = "recording-name";
+    name.textContent = item.name;
+    const meta = document.createElement("div");
+    meta.className = "recording-meta";
+    meta.textContent = `${formatBytes(item.size)} · ${formatTime(item.mtime)}`;
+    info.append(name, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "recording-actions";
+    const download = document.createElement("a");
+    download.href = item.download_url;
+    download.download = item.name;
+    download.textContent = "下载";
+    download.setAttribute("aria-label", `下载 ${item.name}`);
+    download.addEventListener("click", (ev) => ev.stopPropagation());
+    actions.appendChild(download);
+
+    li.append(info, actions);
+    li.addEventListener("click", () => playRecording(item));
+    list.appendChild(li);
+  });
+}
+
+function playRecording(item) {
+  const player = els.recordingPlayer;
+  const hint = els.recordingPlayerHint;
+  // 已经在播这一条 —— 切换 播放/暂停
+  if (activeRecordingName === item.name && player.src) {
+    if (player.paused) {
+      player.play().catch(() => { /* 自动播放受限,用户点 ▶ 即可 */ });
+    } else {
+      player.pause();
+    }
+    return;
+  }
+  activeRecordingName = item.name;
+  player.src = item.url;
+  hint.textContent = `${item.name} · ${formatBytes(item.size)}`;
+  // 刷新高亮
+  Array.from(list_rows()).forEach((row) => {
+    const rowName = row.querySelector(".recording-name")?.textContent;
+    row.dataset.active = rowName === item.name ? "true" : "false";
+  });
+  player.play().catch(() => { /* 自动播放受限,用户点 ▶ 即可 */ });
+}
+
+function list_rows() {
+  return els.recordingList.querySelectorAll(".recording-row");
 }
 
 async function refreshStatus() {
@@ -157,6 +283,10 @@ async function boot() {
   renderModes(data.current);
   await refreshStatus();
   window.setInterval(refreshStatus, 500);
+  // 启动时拉一次录像列表,之后每 10s 兜底轮询一次
+  // (处理"另一台客户端刚刚停止录制"等本机感知不到的状态变化)
+  fetchRecordings();
+  window.setInterval(fetchRecordings, 10000);
 }
 
 els.recognitionToggle.addEventListener("change", async () => {
@@ -243,6 +373,11 @@ els.pushupTargetInput.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     els.applyPushupTargetBtn.click();
   }
+});
+
+els.refreshRecordingsBtn.addEventListener("click", async () => {
+  await fetchRecordings();
+  toast("已刷新录像列表", "green");
 });
 
 boot().catch((err) => toast(err.message, "red"));
