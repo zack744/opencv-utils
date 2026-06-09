@@ -19,6 +19,8 @@ const els = {
   pushupTargetInput: document.querySelector("#pushupTargetInput"),
   applyPushupTargetBtn: document.querySelector("#applyPushupTargetBtn"),
   switchCameraBtn: document.querySelector("#switchCameraBtn"),
+  browserCameraBtn: document.querySelector("#browserCameraBtn"),
+  stopBrowserCameraBtn: document.querySelector("#stopBrowserCameraBtn"),
   recordBtn: document.querySelector("#recordBtn"),
   recordingTime: document.querySelector("#recordingTime"),
   statsList: document.querySelector("#statsList"),
@@ -32,6 +34,15 @@ const els = {
 let currentStatus = null;
 let modes = [];
 let activeRecordingName = null;
+let browserCameraStream = null;
+let browserCameraVideo = null;
+let browserCameraCanvas = null;
+let browserCameraTimer = null;
+let browserCameraUploadInFlight = false;
+let browserCameraLastErrorAt = 0;
+
+const BROWSER_CAMERA_SOURCE = "browser";
+const BROWSER_CAMERA_UPLOAD_FPS = 12;
 
 function toast(message, tone = "neutral") {
   els.toast.textContent = message;
@@ -57,6 +68,16 @@ async function api(path, options = {}) {
     throw new Error(detail);
   }
   return res.json();
+}
+
+function isBrowserCameraRunning() {
+  return Boolean(browserCameraStream);
+}
+
+function syncBrowserCameraControls() {
+  const running = isBrowserCameraRunning();
+  els.browserCameraBtn.disabled = running;
+  els.stopBrowserCameraBtn.hidden = !running;
 }
 
 function renderModes(active) {
@@ -277,6 +298,129 @@ async function switchMode(mode) {
   }
 }
 
+function ensureBrowserCameraElements() {
+  if (!browserCameraVideo) {
+    browserCameraVideo = document.createElement("video");
+    browserCameraVideo.muted = true;
+    browserCameraVideo.playsInline = true;
+    browserCameraVideo.autoplay = true;
+    browserCameraVideo.style.display = "none";
+    document.body.appendChild(browserCameraVideo);
+  }
+  if (!browserCameraCanvas) {
+    browserCameraCanvas = document.createElement("canvas");
+  }
+}
+
+async function blobFromBrowserCamera() {
+  const video = browserCameraVideo;
+  const canvas = browserCameraCanvas;
+  if (!video || !canvas || !video.videoWidth || !video.videoHeight) {
+    return null;
+  }
+  canvas.width = 640;
+  canvas.height = 480;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.72));
+}
+
+async function uploadBrowserCameraFrame() {
+  if (!isBrowserCameraRunning() || browserCameraUploadInFlight) return;
+  browserCameraUploadInFlight = true;
+  try {
+    const blob = await blobFromBrowserCamera();
+    if (!blob) return;
+    const res = await fetch("/api/browser-camera/frame", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: blob,
+    });
+    if (!res.ok) {
+      let detail = "网页摄像头帧上传失败";
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch (_) {
+        detail = await res.text();
+      }
+      throw new Error(detail);
+    }
+  } catch (err) {
+    const now = Date.now();
+    if (now - browserCameraLastErrorAt > 3000) {
+      browserCameraLastErrorAt = now;
+      toast(err.message, "red");
+    }
+  } finally {
+    browserCameraUploadInFlight = false;
+  }
+}
+
+function startBrowserCameraUploadLoop() {
+  window.clearInterval(browserCameraTimer);
+  browserCameraTimer = window.setInterval(
+    uploadBrowserCameraFrame,
+    Math.round(1000 / BROWSER_CAMERA_UPLOAD_FPS)
+  );
+}
+
+async function startBrowserCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast("当前浏览器不支持摄像头权限 API", "red");
+    return;
+  }
+  if (!window.isSecureContext) {
+    toast("网页摄像头需要 HTTPS，或在 localhost 打开", "red");
+    return;
+  }
+
+  try {
+    toast("正在请求浏览器摄像头权限...", "neutral");
+    ensureBrowserCameraElements();
+    browserCameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        frameRate: { ideal: BROWSER_CAMERA_UPLOAD_FPS, max: 15 },
+      },
+    });
+    browserCameraVideo.srcObject = browserCameraStream;
+    await browserCameraVideo.play();
+
+    const status = await api("/api/camera", {
+      method: "POST",
+      body: JSON.stringify({ source: BROWSER_CAMERA_SOURCE }),
+    });
+    els.cameraInput.value = BROWSER_CAMERA_SOURCE;
+    renderStatus(status);
+    startBrowserCameraUploadLoop();
+    syncBrowserCameraControls();
+    toast("网页摄像头已接入检测", "green");
+  } catch (err) {
+    stopBrowserCamera({ silent: true });
+    toast(err.message, "red");
+  }
+}
+
+function stopBrowserCamera(options = {}) {
+  window.clearInterval(browserCameraTimer);
+  browserCameraTimer = null;
+  browserCameraUploadInFlight = false;
+  if (browserCameraStream) {
+    browserCameraStream.getTracks().forEach((track) => track.stop());
+  }
+  browserCameraStream = null;
+  if (browserCameraVideo) {
+    browserCameraVideo.srcObject = null;
+  }
+  syncBrowserCameraControls();
+  if (!options.silent) {
+    toast("网页摄像头已停止", "green");
+  }
+}
+
 async function boot() {
   const data = await api("/api/modes");
   modes = data.modes;
@@ -327,6 +471,9 @@ els.switchCameraBtn.addEventListener("click", async () => {
     toast(err.message, "red");
   }
 });
+
+els.browserCameraBtn.addEventListener("click", startBrowserCamera);
+els.stopBrowserCameraBtn.addEventListener("click", () => stopBrowserCamera());
 
 els.recordBtn.addEventListener("click", async () => {
   const enabled = !(currentStatus && currentStatus.recording);
@@ -380,4 +527,5 @@ els.refreshRecordingsBtn.addEventListener("click", async () => {
   toast("已刷新录像列表", "green");
 });
 
+syncBrowserCameraControls();
 boot().catch((err) => toast(err.message, "red"));

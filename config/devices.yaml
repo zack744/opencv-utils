@@ -38,14 +38,20 @@ bite_finger:
     off_ms: 80
     cooldown: 3.0
 
-# ============ 俯卧撑 → 开锁 (走 Nano D4 继电器 B) ============
+# ============ 俯卧撑 → 开锁 (走 eWeLink 智能继电器, 云端 HTTP) ============
+# 板子: SDY-002_V1.2 / 固件 CK-BL602-4SW-HS-03 (4 路板子, 实际只用 outlet 0)
+# 数据流: 俯卧撑达标 → 树莓派发 HTTP → eWeLink 云 → 家里 WiFi → 板子 MCU → 继电器吸合
+#         继电器 NO/COM 接到 12V 电磁锁回路 (物理接线见项目文档)
 pushup:
   unlock:
-    device: arduino
+    device: ewelink_relay    # 云端 HTTP
     name: door_lock
-    port: /dev/ttyUSB0       # 同一根 USB,串口实例自动复用
-    baud: 9600
-    pin: 4                   # Nano D4 → 继电器B IN → 电磁锁 12V 回路
-    pulse: 2.0               # 通电 2s 开锁,断电锁舌自动弹出
-    active_high: false
-    cooldown: 30.0
+    # ---- eWeLink 账号 / 设备 ----
+    phone: "182xxxxxxxx"     # 纯手机号, 代码自动加 +86 前缀
+    password: "REDACTED_PASSWORD"     # 测试用, 改锁配置前请去 eWeLink App 改密码
+    device_id: "1002b42d5b"  # 易微联 App → 设备 → 设备信息 里查
+    region: cn               # cn / us / eu / as, 中国用户用 cn
+    outlet: 0                # 4 路板子: 0~3, 这里用第 0 路接锁
+    # ---- 时序 ----
+    pulse: 2.0               # 通电 2s 开锁, 锁本身是 fail-secure (断电锁死)
+    cooldown: 30.0           # 两次开锁至少间隔 30s

@@ -30,12 +30,14 @@ def _registry() -> Dict[str, type]:
     from .buzzer import BuzzerDevice
     from .servo_lock import ServoLockDevice
     from .arduino import ArduinoDevice
+    from .ewelink_relay import EwelinkRelay
     return {
         "dummy": DummyDevice,
         "relay": RelayDevice,
         "buzzer": BuzzerDevice,
         "servo_lock": ServoLockDevice,
         "arduino": ArduinoDevice,
+        "ewelink_relay": EwelinkRelay,
         # TODO: "http": HttpDevice, "mqtt": MqttDevice ...
     }
 

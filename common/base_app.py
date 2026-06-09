@@ -20,6 +20,9 @@ import subprocess
 import sys
 import time
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -33,6 +36,8 @@ DEFAULT_CAMERA_SOURCE = 0
 REMOTE_CONNECT_RETRIES = 3
 REMOTE_RETRY_DELAY = 2.0
 REMOTE_RECONNECT_ON_LOST = True
+HTTP_STREAM_OPEN_TIMEOUT = 5.0
+HTTP_STREAM_READ_TIMEOUT = 5.0
 OUTPUT_DIR = "recordings"
 VIDEO_FPS = 20.0
 VIDEO_SIZE = (640, 480)
@@ -59,6 +64,8 @@ PREFER_V4L2_ON_LINUX = True
 # 再用 OpenCV 解码,避开 Picamera2 Python 版本绑定和 OpenCV GStreamer 编译要求。
 RPICAM_SOURCE_NAMES = {"rpicam", "libcamera", "csi", "picam", "picamera"}
 REMOTE_SOURCE_PREFIXES = ("http://", "https://", "rtsp://", "rtmp://", "tcp://", "udp://")
+HTTP_SOURCE_PREFIXES = ("http://", "https://")
+BROWSER_SOURCE_NAMES = {"browser", "web", "client", "client-camera", "browser-camera"}
 
 
 class RpicamMjpegCapture:
@@ -193,6 +200,191 @@ class RpicamMjpegCapture:
                     pass
 
 
+class BrowserFrameCapture:
+    """VideoCapture-compatible source fed by JPEG frames uploaded from the browser."""
+
+    def __init__(self, read_timeout=2.0):
+        self.read_timeout = float(read_timeout)
+        self._lock = threading.Condition()
+        self._latest_frame = None
+        self._seq = 0
+        self._last_read_seq = 0
+        self._closed = False
+        self._last_error = None
+
+    @property
+    def last_error(self):
+        return self._last_error
+
+    def isOpened(self):
+        return not self._closed
+
+    def read(self):
+        deadline = time.time() + self.read_timeout
+        with self._lock:
+            while not self._closed and self._seq == self._last_read_seq:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._lock.wait(timeout=remaining)
+
+            if self._closed or self._latest_frame is None or self._seq == self._last_read_seq:
+                return False, None
+            self._last_read_seq = self._seq
+            return True, self._latest_frame.copy()
+
+    def submit_jpeg(self, data):
+        if self._closed:
+            return False
+        try:
+            arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            self._last_error = f"浏览器帧解码失败: {exc}"
+            return False
+        if frame is None:
+            self._last_error = "浏览器帧解码为空"
+            return False
+        with self._lock:
+            self._latest_frame = frame
+            self._seq += 1
+            self._lock.notify_all()
+        return True
+
+    def set(self, *_args):
+        return False
+
+    def release(self):
+        with self._lock:
+            self._closed = True
+            self._lock.notify_all()
+
+
+class HttpMjpegCapture:
+    """VideoCapture-compatible MJPEG/JPEG-over-HTTP reader for IP cameras."""
+
+    def __init__(self, url, width=640, height=480, read_timeout=2.0):
+        self.url = str(url)
+        self.width = int(width)
+        self.height = int(height)
+        self.read_timeout = float(read_timeout)
+        self._lock = threading.Condition()
+        self._latest_frame = None
+        self._seq = 0
+        self._last_read_seq = 0
+        self._closed = False
+        self._connected = False
+        self._last_error = None
+        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._thread.start()
+
+    @property
+    def last_error(self):
+        return self._last_error
+
+    def isOpened(self):
+        return not self._closed and (self._connected or self._thread.is_alive())
+
+    def read(self):
+        deadline = time.time() + self.read_timeout
+        with self._lock:
+            while self.isOpened() and self._seq == self._last_read_seq:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._lock.wait(timeout=remaining)
+
+            if self._latest_frame is None or self._seq == self._last_read_seq:
+                return False, None
+            self._last_read_seq = self._seq
+            return True, self._latest_frame.copy()
+
+    def set(self, *_args):
+        return False
+
+    def release(self):
+        with self._lock:
+            self._closed = True
+            self._lock.notify_all()
+
+    def _reader_loop(self):
+        req = urllib.request.Request(
+            self.url,
+            headers={
+                "User-Agent": "OpenCV-Web-UI/1.0",
+                "Accept": "multipart/x-mixed-replace,image/jpeg,*/*",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_STREAM_OPEN_TIMEOUT) as resp:
+                self._connected = True
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if content_type and (
+                    "text/html" in content_type
+                    or "text/plain" in content_type
+                    or "application/json" in content_type
+                ):
+                    self._last_error = f"HTTP 地址返回 {content_type},不是视频流"
+                    return
+                if "image/jpeg" in content_type and "multipart" not in content_type:
+                    self._read_snapshot_loop(resp)
+                else:
+                    self._read_mjpeg_loop(resp)
+        except urllib.error.URLError as exc:
+            self._last_error = f"HTTP 摄像头连接失败: {exc}"
+        except Exception as exc:
+            self._last_error = f"HTTP 摄像头读取失败: {exc}"
+        finally:
+            self._connected = False
+            with self._lock:
+                self._lock.notify_all()
+
+    def _read_snapshot_loop(self, resp):
+        data = resp.read(2 * 1024 * 1024)
+        self._submit_jpeg(data)
+
+    def _read_mjpeg_loop(self, resp):
+        buf = bytearray()
+        while not self._closed:
+            chunk = resp.read(4096)
+            if not chunk:
+                time.sleep(0.02)
+                continue
+            buf.extend(chunk)
+            if len(buf) > 4 * 1024 * 1024:
+                del buf[:len(buf) - 1024 * 1024]
+
+            while True:
+                start = buf.find(b"\xff\xd8")
+                if start < 0:
+                    if len(buf) > 1024 * 1024:
+                        buf.clear()
+                    break
+                end = buf.find(b"\xff\xd9", start + 2)
+                if end < 0:
+                    if start > 0:
+                        del buf[:start]
+                    break
+                jpeg = bytes(buf[start:end + 2])
+                del buf[:end + 2]
+                self._submit_jpeg(jpeg)
+
+    def _submit_jpeg(self, data):
+        if not data:
+            return False
+        frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            self._last_error = "HTTP 摄像头帧解码为空"
+            return False
+        if self.width > 0 and self.height > 0 and (frame.shape[1], frame.shape[0]) != (self.width, self.height):
+            frame = cv2.resize(frame, (self.width, self.height))
+        with self._lock:
+            self._latest_frame = frame
+            self._seq += 1
+            self._lock.notify_all()
+        return True
+
+
 class BaseCameraApp(ABC):
     app_title = "检测系统"
     app_subtitle = ""
@@ -216,6 +408,7 @@ class BaseCameraApp(ABC):
         self.camera_status = "disconnected"
         self.current_fps = 0
         self.app_state = {}
+        self.current_camera = self._normalize_camera_source_value(self.current_camera)
 
         #: 外设事件分发器。可以是 None(不接外设)或 ActionDispatcher 实例。
         #: 由 RuntimeManager 在创建 app 时注入,实现 app/外设解耦。
@@ -298,6 +491,32 @@ class BaseCameraApp(ABC):
     def _is_remote_source(self, source):
         return isinstance(source, str) and source.strip().lower().startswith(REMOTE_SOURCE_PREFIXES)
 
+    def _is_http_source(self, source):
+        return isinstance(source, str) and source.strip().lower().startswith(HTTP_SOURCE_PREFIXES)
+
+    def _normalize_camera_source_value(self, source):
+        if not isinstance(source, str):
+            return source
+        source = source.strip()
+        if not source:
+            return source
+        lower = source.lower()
+        if (
+            "://" not in source
+            and not source.startswith("/")
+            and not self._is_browser_source(source)
+            and not self._is_rpicam_source(source)
+            and (
+                lower.startswith("localhost:")
+                or lower.startswith("127.0.0.1:")
+                or lower.startswith("[::1]:")
+                or ("/" in source and "." in source.split("/", 1)[0])
+                or (":" in source and "." in source.split(":", 1)[0])
+            )
+        ):
+            return f"http://{source}"
+        return source
+
     def _is_rpicam_source(self, source):
         if not isinstance(source, str):
             return False
@@ -305,7 +524,16 @@ class BaseCameraApp(ABC):
         name = value.split(":", 1)[0]
         return name in RPICAM_SOURCE_NAMES
 
+    def _is_browser_source(self, source):
+        if not isinstance(source, str):
+            return False
+        value = source.strip().lower()
+        name = value.split(":", 1)[0]
+        return name in BROWSER_SOURCE_NAMES
+
     def _describe_source(self, source):
+        if self._is_browser_source(source):
+            return "网页端摄像头"
         if self._is_rpicam_source(source):
             return f"树莓派 CSI {source}"
         if self._is_remote_source(source):
@@ -315,11 +543,70 @@ class BaseCameraApp(ABC):
         return f"本地 #{source}"
 
     def _connect_camera(self, source):
+        source = self._normalize_camera_source_value(source)
+        if self._is_browser_source(source):
+            return self._connect_browser_camera()
         if self._is_rpicam_source(source):
             return self._connect_rpicam_camera(source)
+        if self._is_http_source(source):
+            return self._connect_http_mjpeg_camera(source)
         if self._is_remote_source(source):
             return self._connect_remote_camera(source)
         return self._connect_local_camera(source)
+
+    def _connect_browser_camera(self):
+        self.camera_status = "disconnected"
+        return BrowserFrameCapture(read_timeout=float(os.environ.get("BROWSER_CAMERA_READ_TIMEOUT", "2.0")))
+
+    def _http_source_candidates(self, source):
+        source = str(source).strip()
+        candidates = [source]
+        parsed = urllib.parse.urlsplit(source)
+        path = parsed.path or ""
+        if path in {"", "/"}:
+            base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+            common_paths = (
+                "/video",
+                "/videofeed",
+                "/mjpeg",
+                "/mjpegfeed",
+                "/video.mjpg",
+                "/?action=stream",
+            )
+            candidates.extend(base + path for path in common_paths)
+
+        seen = set()
+        result = []
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                result.append(candidate)
+        return result
+
+    def _connect_http_mjpeg_camera(self, source):
+        last_error = None
+        read_timeout = float(os.environ.get("HTTP_STREAM_READ_TIMEOUT", str(HTTP_STREAM_READ_TIMEOUT)))
+        for candidate in self._http_source_candidates(source):
+            cap = HttpMjpegCapture(
+                candidate,
+                width=int(os.environ.get("CAM_WIDTH", str(VIDEO_SIZE[0]))),
+                height=int(os.environ.get("CAM_HEIGHT", str(VIDEO_SIZE[1]))),
+                read_timeout=read_timeout,
+            )
+            # HTTP 源必须拿到首帧才算连接成功，避免页面提示成功但检测画面一直黑屏。
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                logger.info("HTTP 摄像头连接成功 source=%s size=%dx%d", candidate, frame.shape[1], frame.shape[0])
+                self.camera_status = "ok"
+                return cap
+
+            last_error = cap.last_error or "等待首帧超时"
+            logger.warning("HTTP 摄像头候选失败 source=%s error=%s", candidate, last_error)
+            cap.release()
+
+        logger.error("HTTP 摄像头所有候选均失败 source=%s last_error=%s", source, last_error)
+        self.camera_status = "disconnected"
+        return cv2.VideoCapture()
 
     def _connect_rpicam_camera(self, source):
         camera = os.environ.get("RPICAM_CAMERA")
@@ -505,6 +792,7 @@ class BaseCameraApp(ABC):
         if (
             self._is_remote_source(self.current_camera)
             or self._is_rpicam_source(self.current_camera)
+            or self._is_browser_source(self.current_camera)
             or isinstance(self.current_camera, str)
         ):
             return False
@@ -578,7 +866,7 @@ class BaseCameraApp(ABC):
 
     def apply_camera_source_value(self, source):
         if isinstance(source, str):
-            source = source.strip()
+            source = self._normalize_camera_source_value(source)
             if not source:
                 return False
             try:
@@ -591,6 +879,13 @@ class BaseCameraApp(ABC):
 
     def switch_camera(self):
         return bool(self._switch_camera())
+
+    def submit_browser_frame(self, data):
+        with self._cap_lock:
+            cap = self.cap
+        if cap is None or not hasattr(cap, "submit_jpeg"):
+            return False
+        return bool(cap.submit_jpeg(data))
 
     def start_recording(self):
         if self.is_recording:

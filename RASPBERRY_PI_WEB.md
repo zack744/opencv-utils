@@ -90,10 +90,23 @@ http://树莓派IP:8000
 | 第二个树莓派排线 CSI 摄像头 | `--source rpicam:1` |
 | 第二个本地摄像头 | `--source 1` |
 | 明确指定 V4L2 设备 | `--source /dev/video0` |
-| 手机 IP Webcam | `--source http://192.168.1.105:8080/video` |
+| 手机 IP Webcam / HTTP MJPEG | `--source http://192.168.1.105:8080/video` |
 | RTSP 摄像头 | `--source rtsp://user:pass@ip/stream1` |
+| 网页端摄像头 | 页面点击"使用网页摄像头"，或填入 `browser` |
 
 页面里也可以直接修改摄像头源并点击"应用"。
+HTTP 摄像头源如果漏写协议头,例如 `192.168.1.105:8080/video`,服务会自动按 `http://192.168.1.105:8080/video` 处理。
+如果填的是 IP Webcam 根地址,例如 `http://192.168.1.105:8080`,服务会先检查根地址,发现它是 HTML 控制台后自动尝试 `/video` 等常见 MJPEG 路径。
+网页端摄像头使用浏览器 `getUserMedia`,跨设备访问树莓派时需要 HTTPS;如果用 `http://树莓派IP:8000` 打开,大多数浏览器会拒绝摄像头权限。
+
+HTTPS 启动示例:
+
+```bash
+python web_server.py --host 0.0.0.0 --port 8000 \
+  --source browser \
+  --certfile /path/to/cert.pem \
+  --keyfile /path/to/key.pem
+```
 
 树莓派 Camera Module 这类排线摄像头建议按顺序排查:
 

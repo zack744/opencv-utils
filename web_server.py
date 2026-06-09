@@ -185,6 +185,13 @@ class RuntimeManager:
                 raise RuntimeError("当前摄像头源不支持 0/1 切换，或目标摄像头不可用")
             return self.status()
 
+    def submit_browser_frame(self, data):
+        with self._lock:
+            runtime = self._require_runtime()
+        if not hasattr(runtime, "submit_browser_frame"):
+            return False
+        return bool(runtime.submit_browser_frame(data))
+
     def set_pushup_target(self, reps):
         """仅 pushup 模式生效：调整触发解锁所需的俯卧撑次数。"""
         with self._lock:
@@ -277,6 +284,21 @@ def switch_camera():
         return jsonify({"detail": str(exc)}), 400
 
 
+@app.post("/api/browser-camera/frame")
+def submit_browser_camera_frame():
+    data = request.get_data(cache=False)
+    if not data:
+        return jsonify({"detail": "缺少图像帧"}), 400
+    if len(data) > 2 * 1024 * 1024:
+        return jsonify({"detail": "图像帧过大"}), 413
+    try:
+        if not manager.submit_browser_frame(data):
+            return jsonify({"detail": "当前摄像头源不是 browser"}), 409
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"detail": str(exc)}), 400
+
+
 @app.post("/api/pushup/target")
 def set_pushup_target():
     data = request.get_json(silent=True) or {}
@@ -360,6 +382,8 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000, help="监听端口")
     parser.add_argument("--mode", choices=list(MODES.keys()), default=DEFAULT_MODE, help="启动模式")
     parser.add_argument("--source", default=None, help="摄像头源: 0/1 或 http/rtsp URL")
+    parser.add_argument("--certfile", default=None, help="HTTPS 证书文件，网页端摄像头跨设备访问时需要")
+    parser.add_argument("--keyfile", default=None, help="HTTPS 私钥文件，需与 --certfile 一起使用")
     return parser.parse_args()
 
 
@@ -372,4 +396,9 @@ if __name__ == "__main__":
     if args.source is not None:
         DEFAULT_SOURCE = _parse_source(args.source)
     manager.ensure_started(DEFAULT_MODE, DEFAULT_SOURCE)
-    app.run(host=args.host, port=args.port, threaded=True)
+    ssl_context = None
+    if args.certfile or args.keyfile:
+        if not args.certfile or not args.keyfile:
+            raise SystemExit("--certfile 和 --keyfile 需要同时提供")
+        ssl_context = (args.certfile, args.keyfile)
+    app.run(host=args.host, port=args.port, threaded=True, ssl_context=ssl_context)
