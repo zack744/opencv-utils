@@ -53,5 +53,7 @@ pushup:
     region: cn               # cn / us / eu / as, 中国用户用 cn
     outlet: 0                # 4 路板子: 0~3, 这里用第 0 路接锁
     # ---- 时序 ----
-    pulse: 2.0               # 通电 2s 开锁, 锁本身是 fail-secure (断电锁死)
+    pulse: 10.0               # 断电 5s 开锁, 锁本身是 fail-safe (通电锁死)
+    #   触发 → 板子 OFF (NC 断开) → 锁断电 → 锁芯收回 → 门开
+    #   5s 后 → 板子 ON (NC 闭合) → 锁通电 → 锁芯弹出 → 门上锁
     cooldown: 30.0           # 两次开锁至少间隔 30s

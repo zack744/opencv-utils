@@ -231,27 +231,42 @@ class EwelinkRelay(Device):
 
     # ---------- Device 接口实现 ---------- #
     def trigger(self, payload: Optional[Dict[str, Any]] = None) -> None:
-        """业务层入口: ON 一段时间,然后 OFF.
+        """业务层入口: 业务触发时 锁断电(板子 OFF, NC 端子断开)→ 锁芯收回 → 门开,
+        pulse 秒后 锁通电(板子 ON, NC 端子闭合)→ 锁芯弹出 → 门上锁.
+
+        适用场景: 锁是 fail-safe (通电锁住, 断电开) —— 你家的电子锁就是这种.
 
         pulse 参数 (秒):
             - payload 里的 pulse 优先
             - 否则用 __init__ 配置的 default_pulse
-            - 限幅 0~60s
+            - 限幅 0.5~15s (上限 15s: eWeLink 云端对同 outlet 短间隔连发会 4002 节流)
+
+        ⚠️ 复位的 _control(True) 如果失败 (常见: eWeLink 4002 节流),
+            不会向上抛异常 —— 业务事件已经成功 (门已经开过),不复位的后果
+            只是锁多保持一会儿"门开"状态,下次业务触发时再覆盖。
+            若真需要"上锁",让用户手动在易微联 App 里点一下。
         """
         pulse = float(self._param(payload, "pulse", self.default_pulse))
-        pulse = max(0.0, min(pulse, 60.0))
+        pulse = max(0.5, min(pulse, 15.0))  # 上限收紧到 15s,避开云端 4002 节流
 
-        self._control(True)
+        self._control(False)  # 业务触发 = 板子 OFF = 锁断电 = 锁芯收回 = 门开
         try:
             time.sleep(pulse)
         finally:
-            self._control(False)
+            # 复位失败容忍: 不抛异常,只打 ERROR,避免覆盖上层业务日志
+            try:
+                self._control(True)   # 复位 = 板子 ON = 锁通电 = 锁芯弹出 = 门锁住
+            except DeviceError as exc:
+                logger.error(
+                    f"[ewelink:{self.name}] 复位上锁失败 (云端可能节流): {exc} "
+                    f"—— 锁暂时保持门开状态,下次触发或手动在易微联 App 点 ON 即可恢复"
+                )
 
     def close(self) -> None:
-        """服务关闭时复位到 OFF 状态。"""
+        """服务关闭时复位到 ON 状态 (锁通电上锁, fail-safe 锁的常态)."""
         try:
             if self._token is not None:
-                self._control(False)
+                self._control(True)
         except Exception:
             logger.exception(f"[ewelink:{self.name}] 关闭时复位失败")
         super().close()

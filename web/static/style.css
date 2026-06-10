@@ -770,6 +770,68 @@ button.ghost:hover {
   }
 
   .mode-tabs button {
-    min-width: 96px;
-  }
+ min-width:96px;
+ }
+}
+
+/*底部管理员调试区 —— 默认折叠，观众视图不会看到 */
+.admin-drawer {
+ width: min(1440px, calc(100% -36px));
+ margin:24px auto32px;
+ border:1px solid var(--line);
+ border-radius:8px;
+ background: var(--surface-2);
+ color: var(--muted);
+ font-size:13px;
+ overflow: hidden;
+}
+
+.admin-drawer > summary {
+ cursor: pointer;
+ list-style: none;
+ padding:10px14px;
+ font-weight:500;
+ color: var(--muted-2);
+ user-select: none;
+ transition: color120ms ease, background120ms ease;
+}
+
+.admin-drawer > summary::-webkit-details-marker {
+ display: none;
+}
+
+.admin-drawer > summary::before {
+ content: "▸";
+ display: inline-block;
+ margin-right:8px;
+ font-size:11px;
+ transition: transform160ms ease;
+}
+
+.admin-drawer[open] > summary::before {
+ transform: rotate(90deg);
+}
+
+.admin-drawer > summary:hover {
+ color: var(--ink);
+ background: var(--surface-3);
+}
+
+.admin-drawer-body {
+ padding:14px16px16px;
+ display: grid;
+ gap:10px;
+ border-top:1px solid var(--line);
+ background: var(--surface);
+}
+
+.admin-drawer-body .camera-row {
+ margin:0;
+}
+
+.admin-hint {
+ margin:4px2px0;
+ color: var(--muted-2);
+ font-size:11px;
+ line-height:1.5;
 }
