@@ -32,7 +32,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CAMERA_SOURCE = 0
+DEFAULT_CAMERA_SOURCE = None
 REMOTE_CONNECT_RETRIES = 3
 REMOTE_RETRY_DELAY = 2.0
 REMOTE_RECONNECT_ON_LOST = True
@@ -421,7 +421,7 @@ class BaseCameraApp(ABC):
         self._stop_event = threading.Event()
 
         self.setup_detector()
-        self.cap = self._connect_camera(self.current_camera)
+        self.cap = self._connect_camera(self.current_camera) if self.current_camera is not None else None
 
         self._camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
         self._camera_thread.start()
@@ -532,6 +532,8 @@ class BaseCameraApp(ABC):
         return name in BROWSER_SOURCE_NAMES
 
     def _describe_source(self, source):
+        if source is None:
+            return "未设置"
         if self._is_browser_source(source):
             return "网页端摄像头"
         if self._is_rpicam_source(source):
@@ -543,6 +545,9 @@ class BaseCameraApp(ABC):
         return f"本地 #{source}"
 
     def _connect_camera(self, source):
+        if source is None:
+            self.camera_status = "disconnected"
+            return None
         source = self._normalize_camera_source_value(source)
         if self._is_browser_source(source):
             return self._connect_browser_camera()
@@ -971,7 +976,7 @@ class BaseCameraApp(ABC):
             "app_icon": self.app_icon,
             "camera_status": self.camera_status,
             "camera_source": self._describe_source(self.current_camera),
-            "camera_source_value": str(self.current_camera),
+            "camera_source_value": "" if self.current_camera is None else str(self.current_camera),
             "fps": self.current_fps,
             "recognition_enabled": self.is_recognition_enabled,
             "recording": self.is_recording,

@@ -3,7 +3,6 @@ import atexit
 import importlib.util
 import logging
 import os
-import shutil
 import sys
 import threading
 import time
@@ -53,10 +52,6 @@ def _default_start_source():
     configured = os.environ.get("CAMERA_SOURCE") or os.environ.get("DEFAULT_CAMERA_SOURCE")
     if configured:
         return configured
-    if sys.platform.startswith("linux") and (
-        shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
-    ):
-        return "rpicam"
     return None
 
 
@@ -95,37 +90,47 @@ def _load_app_class(mode):
 class RuntimeManager:
     def __init__(self, dispatcher=None):
         self._lock = threading.RLock()
+        self._transition_lock = threading.Lock()
         self.runtime = None
         self.mode = None
         self.dispatcher = dispatcher  # 外设事件分发器,所有 app 共享一份
 
     def ensure_started(self, mode=DEFAULT_MODE, source=None):
-        with self._lock:
-            if self.runtime is None:
-                self._start_locked(mode, source)
+        with self._transition_lock:
+            with self._lock:
+                if self.runtime is not None:
+                    return
+            runtime = self._build_runtime(mode, source)
+            with self._lock:
+                self.runtime = runtime
+                self.mode = mode
 
     def switch_mode(self, mode, source=None):
         if mode not in MODES:
             raise ValueError(f"未知模式: {mode}")
-        with self._lock:
-            self._stop_locked()
-            self._start_locked(mode, source)
+        with self._transition_lock:
+            self._detach_runtime()
+            runtime = self._build_runtime(mode, source)
+            with self._lock:
+                self.runtime = runtime
+                self.mode = mode
             return self.status()
 
-    def _start_locked(self, mode, source=None):
+    def _build_runtime(self, mode, source=None):
         app_cls = _load_app_class(mode)
-        self.runtime = app_cls(source=_parse_source(source), dispatcher=self.dispatcher)
-        self.mode = mode
+        return app_cls(source=_parse_source(source), dispatcher=self.dispatcher)
 
-    def _stop_locked(self):
-        if self.runtime is not None:
-            self.runtime.close()
-        self.runtime = None
-        self.mode = None
+    def _detach_runtime(self):
+        with self._lock:
+            runtime = self.runtime
+            self.runtime = None
+            self.mode = None
+        if runtime is not None:
+            runtime.close()
 
     def close(self):
-        with self._lock:
-            self._stop_locked()
+        with self._transition_lock:
+            self._detach_runtime()
         if self.dispatcher is not None:
             try:
                 self.dispatcher.close()
@@ -172,15 +177,19 @@ class RuntimeManager:
             return self.status()
 
     def set_camera(self, source):
-        with self._lock:
-            ok = self._require_runtime().apply_camera_source_value(source)
+        with self._transition_lock:
+            with self._lock:
+                runtime = self._require_runtime()
+            ok = runtime.apply_camera_source_value(source)
             if not ok:
                 raise RuntimeError(f"无法连接摄像头源: {source}")
             return self.status()
 
     def switch_camera(self):
-        with self._lock:
-            ok = self._require_runtime().switch_camera()
+        with self._transition_lock:
+            with self._lock:
+                runtime = self._require_runtime()
+            ok = runtime.switch_camera()
             if not ok:
                 raise RuntimeError("当前摄像头源不支持 0/1 切换，或目标摄像头不可用")
             return self.status()

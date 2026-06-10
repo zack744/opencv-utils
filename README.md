@@ -55,6 +55,7 @@ python web_server.py --host 0.0.0.0 --port 8000 --source 0
 ```
 
 浏览器打开 `http://localhost:8000`,可在页面里切换模式 / 改摄像头源 / 开关识别 / 开关录制。
+未传 `--source` 时服务不会自动查找或打开摄像头,需要在页面里填写摄像头源并点击"应用"。
 
 ### 树莓派 (Linux,启用 GPIO 外设)
 
