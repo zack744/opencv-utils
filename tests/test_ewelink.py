@@ -9,7 +9,7 @@
 重要信息 (基于对当前 eWeLink v2 API 的实际探测):
 ========================================================================
   - 域名: https://cn-apia.coolkit.cn   (注意是 -apia, 不是 -api)
-  - appid: EWELINK_APPID_REDACTED
+  - appid / appsecret: 从 .env 读(参考项目根的 .env.example)
   - 控制接口: /v2/device/thing/status   (老的 /v2/device/control 已废弃)
   - 登录接口: /v2/user/login
   - 登录 Sign 算法: base64(HMAC-SHA256(appSecret, body_bytes))
@@ -22,8 +22,8 @@
     cd D:\\project\\OpenCV
     E:\\anaconda\\envs\\opencv-web\\python.exe tests\\test_ewelink.py `
         --phone 182xxxxxxxx `
-        --password "你的密码" `
-        --device-id 1002b42d5b `
+        --password "your_password" `
+        --device-id 1002xxxxxxxx `
         --outlet 0 `
         --pulse 1.0
 
@@ -31,8 +31,8 @@
 跑法 2: 环境变量
 ========================================================================
     $env:EWELINK_PHONE='182xxxxxxxx'
-    $env:EWELINK_PASSWORD='你的密码'
-    $env:EWELINK_DEVICE_ID='1002b42d5b'
+    $env:EWELINK_PASSWORD='your_password'
+    $env:EWELINK_DEVICE_ID='1002xxxxxxxx'
     E:\\anaconda\\envs\\opencv-web\\python.exe tests\\test_ewelink.py
 
 ========================================================================
@@ -60,14 +60,39 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
 
+def _load_dotenv() -> None:
+    """从项目根的 .env 加载环境变量(简单 KEY=VALUE 解析,不依赖 python-dotenv)。"""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_dotenv()
+
+
 # ---------- eWeLink 公共配置 ---------- #
-APPID = "EWELINK_APPID_REDACTED"
-APPSECRET = "EWELINK_APPSECRET_REDACTED"
+# appid / appsecret 不再硬编码,统一从环境变量读
+# (测试时也从项目根的 .env 自动加载)
+APPID = os.environ.get("EWELINK_APPID", "").strip()
+APPSECRET = os.environ.get("EWELINK_APPSECRET", "").strip()
 
 REGION_API: Dict[str, str] = {
     "cn": "https://cn-apia.coolkit.cn",
@@ -252,6 +277,10 @@ def main() -> int:
         missing.append("--phone / EWELINK_PHONE")
     if not password:
         missing.append("--password / EWELINK_PASSWORD")
+    if not APPID:
+        missing.append("EWELINK_APPID (从 .env 或环境变量注入)")
+    if not APPSECRET:
+        missing.append("EWELINK_APPSECRET (从 .env 或环境变量注入)")
     if not args.no_trigger and not device_id:
         missing.append("--device-id / EWELINK_DEVICE_ID")
     if missing:

@@ -19,7 +19,9 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
@@ -38,26 +40,63 @@ REGION_API: Dict[str, str] = {
     "as": "https://as-apia.coolkit.cc",
 }
 
-# 公开 appid / appsecret (从 SonoffLAN 项目反向得到的当前可用凭证)
-EWELINK_APPID = "EWELINK_APPID_REDACTED"
-EWELINK_APPSECRET = "EWELINK_APPSECRET_REDACTED"
-
 # 4 路板子: outlet 取值 0~3
 VALID_OUTLETS = (0, 1, 2, 3)
+
+
+def _load_dotenv() -> None:
+    """从项目根的 .env 加载环境变量(简单 KEY=VALUE 解析,不依赖 python-dotenv)。
+
+    仅当变量尚未设置时才覆盖,避免覆盖进程已注入的环境变量。
+    """
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError as exc:
+        logger.warning(f"读取 {env_path} 失败: {exc}")
+
+
+def _get_credential(env_key: str) -> Optional[str]:
+    """读 .env / 系统环境变量里的 eWeLink 凭证。"""
+    val = os.environ.get(env_key, "").strip()
+    return val or None
+
+
+# 模块加载时尝试读 .env(优先;命令行/系统环境变量已在 os.environ 里的更高优先)
+_load_dotenv()
 
 
 class EwelinkRelay(Device):
     """eWeLink 智能继电器 - 走云端 HTTP 控制单路 / 多路板子。
 
-    配置示例 (config/devices.yaml):
+    凭证(appid / appsecret / phone / password)统一从项目根的 .env 文件
+    或系统环境变量读取,不要硬编码或写到 config/*.yaml 里(会被推到 GitHub)。
+
+    必需环境变量(参考 .env.example):
+        EWELINK_APPID
+        EWELINK_APPSECRET
+        EWELINK_PHONE         (纯手机号, +86 前缀自动加)
+        EWELINK_PASSWORD
+        EWELINK_DEVICE_ID     (易微联 App 设备信息里查)
+        EWELINK_REGION        (cn / us / eu / as, 默认 cn)
+
+    配置示例 (config/devices.yaml) —— 只放非敏感字段:
         device: ewelink_relay
         name: door_lock
-        phone: "182xxxxxxxx"        # 纯手机号, +86 前缀自动加
-        password: "你的eWeLink密码"
-        device_id: "1002xxxxxxxxxx"  # 易微联 App 设备信息里查
-        region: cn                  # cn / us / eu / as
-        outlet: 0                   # 4 路板子: 0~3, 单路板子填 0
-        pulse: 2.0                  # ON 持续秒数, 然后自动 OFF
+        device_id: "1002xxxxxxxxxx"
+        region: cn
+        outlet: 0
+        pulse: 2.0
     """
 
     kind = "ewelink_relay"
@@ -66,18 +105,42 @@ class EwelinkRelay(Device):
         super().__init__(name, config)
 
         # 凭证 + 设备定位
-        self.phone: str = str(self.config.get("phone", "")).strip()
-        self.password: str = str(self.config.get("password", "")).strip()
-        self.device_id: str = str(self.config.get("device_id", "")).strip()
-        self.region: str = str(self.config.get("region", "cn")).strip().lower()
+        # 优先: config 显式传 → .env / 系统环境变量
+        self.phone: str = str(
+            self.config.get("phone") or _get_credential("EWELINK_PHONE") or ""
+        ).strip()
+        self.password: str = str(
+            self.config.get("password") or _get_credential("EWELINK_PASSWORD") or ""
+        ).strip()
+        self.device_id: str = str(
+            self.config.get("device_id") or _get_credential("EWELINK_DEVICE_ID") or ""
+        ).strip()
+        self.region: str = str(
+            self.config.get("region") or _get_credential("EWELINK_REGION") or "cn"
+        ).strip().lower()
         self.outlet: int = int(self.config.get("outlet", 0))
         self.default_pulse: float = float(self.config.get("pulse", 0.3))
 
+        # appid / appsecret 仅从 .env 或环境变量读(永不放在 yaml / 配置文件里)
+        self._appid: Optional[str] = _get_credential("EWELINK_APPID")
+        self._appsecret: Optional[str] = _get_credential("EWELINK_APPSECRET")
+
         # 配置校验 (factory 捕获 DeviceError 后会降级 dummy)
         if not self.phone or not self.password:
-            raise DeviceError(f"[{name}] 缺少 phone/password")
+            raise DeviceError(
+                f"[{name}] 缺少 phone/password (检查 config/*.yaml 或 .env 里的 "
+                f"EWELINK_PHONE / EWELINK_PASSWORD)"
+            )
         if not self.device_id:
-            raise DeviceError(f"[{name}] 缺少 device_id (在 eWeLink App 里查)")
+            raise DeviceError(
+                f"[{name}] 缺少 device_id (检查 config/*.yaml 或 .env 里的 "
+                f"EWELINK_DEVICE_ID)"
+            )
+        if not self._appid or not self._appsecret:
+            raise DeviceError(
+                f"[{name}] 缺少 EWELINK_APPID / EWELINK_APPSECRET "
+                f"(从项目根的 .env 或系统环境变量注入)"
+            )
         if self.region not in REGION_API:
             raise DeviceError(
                 f"[{name}] region={self.region!r} 不支持, 可选: {list(REGION_API)}"
@@ -101,11 +164,11 @@ class EwelinkRelay(Device):
             self._token = None
 
     # ---------- 签名 + 认证 ---------- #
-    @staticmethod
-    def _sign(body_bytes: bytes) -> str:
+    def _sign(self, body_bytes: bytes) -> str:
         """eWeLink v2 登录签名: base64(HMAC-SHA256(appSecret, body_bytes))"""
+        assert self._appsecret, "appsecret 未加载 (构造函数应已校验)"
         sig = hmac.new(
-            EWELINK_APPSECRET.encode("utf-8"),
+            self._appsecret.encode("utf-8"),
             body_bytes,
             hashlib.sha256,
         ).digest()
@@ -124,7 +187,7 @@ class EwelinkRelay(Device):
             "version": 8,
             "nonce": str(int(time.time() * 1000)),
             "ts": int(time.time()),
-            "appid": EWELINK_APPID,
+            "appid": self._appid,
         }
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         sign = self._sign(body_bytes)
@@ -134,7 +197,7 @@ class EwelinkRelay(Device):
                 f"{self.base_url}/v2/user/login",
                 data=body_bytes,
                 headers={
-                    "X-CK-Appid": EWELINK_APPID,
+                    "X-CK-Appid": self._appid,
                     "Authorization": f"Sign {sign}",
                     "Content-Type": "application/json",
                 },
@@ -198,7 +261,7 @@ class EwelinkRelay(Device):
                 f"{self.base_url}/v2/device/thing/status",
                 data=body_bytes,
                 headers={
-                    "X-CK-Appid": EWELINK_APPID,
+                    "X-CK-Appid": self._appid,
                     "Authorization": f"Bearer {self._token}",
                     "Content-Type": "application/json",
                 },

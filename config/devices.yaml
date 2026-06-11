@@ -42,13 +42,15 @@ bite_finger:
 # 板子: SDY-002_V1.2 / 固件 CK-BL602-4SW-HS-03 (4 路板子, 实际只用 outlet 0)
 # 数据流: 俯卧撑达标 → 树莓派发 HTTP → eWeLink 云 → 家里 WiFi → 板子 MCU → 继电器吸合
 #         继电器 NO/COM 接到 12V 电磁锁回路 (物理接线见项目文档)
+#
+# 凭证 (phone / password / appid / appsecret) 已统一从项目根的 .env 读取,
+# 不要在 yaml 里写真值——会被 git 推到 GitHub 公开仓库。
+# 配置示例见项目根的 .env.example。
 pushup:
   unlock:
     device: ewelink_relay    # 云端 HTTP
     name: door_lock
-    # ---- eWeLink 账号 / 设备 ----
-    phone: "182xxxxxxxx"     # 纯手机号, 代码自动加 +86 前缀
-    password: "REDACTED_PASSWORD"     # 测试用, 改锁配置前请去 eWeLink App 改密码
+    # ---- eWeLink 设备定位(非敏感, 设备 ID 是公开的)----
     device_id: "1002b42d5b"  # 易微联 App → 设备 → 设备信息 里查
     region: cn               # cn / us / eu / as, 中国用户用 cn
     outlet: 0                # 4 路板子: 0~3, 这里用第 0 路接锁
@@ -57,3 +59,4 @@ pushup:
     #   触发 → 板子 OFF (NC 断开) → 锁断电 → 锁芯收回 → 门开
     #   5s 后 → 板子 ON (NC 闭合) → 锁通电 → 锁芯弹出 → 门上锁
     cooldown: 30.0           # 两次开锁至少间隔 30s
+    # phone / password 不再写这里 → 走 .env 里的 EWELINK_PHONE / EWELINK_PASSWORD

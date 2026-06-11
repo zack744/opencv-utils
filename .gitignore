@@ -52,6 +52,9 @@ logs/
 *.local
 config/local_*.yaml
 
+# git filter-repo 的替换规则文件(脱敏用,绝不能进仓)
+.filter-replace.txt
+
 # ---------- OS ----------
 desktop.ini
 $RECYCLE.BIN/
