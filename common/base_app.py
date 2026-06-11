@@ -967,8 +967,8 @@ class BaseCameraApp(ABC):
         return buf.tobytes()
 
     def get_status_snapshot(self):
-        with self._frame_lock:
-            status = dict(self._latest_status or self._default_status())
+        status_ref = self._latest_status
+        status = dict(status_ref or self._default_status())
         elapsed = time.time() - self.recording_start_time if self.is_recording else 0.0
         status.update({
             "app_title": self.app_title,

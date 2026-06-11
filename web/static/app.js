@@ -40,9 +40,22 @@ let browserCameraCanvas = null;
 let browserCameraTimer = null;
 let browserCameraUploadInFlight = false;
 let browserCameraLastErrorAt = 0;
+let streamReconnectTimer = null;
+let streamReconnectDelay = 1000;
+let streamReconnectFailures = 0;
+let streamRefreshTimer = null;
+let statusPollTimer = null;
+let statusFailureCount = 0;
+let statusDisconnectedCount = 0;
 
 const BROWSER_CAMERA_SOURCE = "browser";
 const BROWSER_CAMERA_UPLOAD_FPS = 12;
+const STREAM_REFRESH_MS = 25000;
+const STREAM_RECONNECT_MAX_DELAY = 5000;
+const STREAM_MAX_RECONNECT_FAILURES = 3;
+const STATUS_POLL_MS = 1500;
+const STATUS_MAX_FAILURES = 3;
+const STATUS_MAX_DISCONNECTED = 3;
 
 function toast(message, tone = "neutral") {
   els.toast.textContent = message;
@@ -80,6 +93,53 @@ function syncBrowserCameraControls() {
   els.stopBrowserCameraBtn.hidden = !running;
 }
 
+function resetStreamBackoff() {
+  streamReconnectDelay = 1000;
+  streamReconnectFailures = 0;
+}
+
+function restartStream(options = {}) {
+  if (!options.force && streamReconnectFailures >= STREAM_MAX_RECONNECT_FAILURES) {
+    return;
+  }
+  window.clearTimeout(streamReconnectTimer);
+  streamReconnectTimer = null;
+  els.stream.src = `/stream?t=${Date.now()}`;
+}
+
+function scheduleStreamReconnect() {
+  if (streamReconnectFailures >= STREAM_MAX_RECONNECT_FAILURES) {
+    stopStreamRefresh();
+    return;
+  }
+  streamReconnectFailures += 1;
+  window.clearTimeout(streamReconnectTimer);
+  streamReconnectTimer = window.setTimeout(() => {
+    restartStream();
+    streamReconnectDelay = Math.min(streamReconnectDelay * 1.5, STREAM_RECONNECT_MAX_DELAY);
+  }, streamReconnectDelay);
+}
+
+function stopStatusPolling() {
+  window.clearInterval(statusPollTimer);
+  statusPollTimer = null;
+}
+
+function startStatusPolling() {
+  stopStatusPolling();
+  statusPollTimer = window.setInterval(refreshStatus, STATUS_POLL_MS);
+}
+
+function stopStreamRefresh() {
+  window.clearInterval(streamRefreshTimer);
+  streamRefreshTimer = null;
+}
+
+function startStreamRefresh() {
+  stopStreamRefresh();
+  streamRefreshTimer = window.setInterval(restartStream, STREAM_REFRESH_MS);
+}
+
 function renderModes(active) {
   els.modeTabs.innerHTML = "";
   modes.forEach((mode) => {
@@ -97,6 +157,10 @@ function toneFromColor(color) {
 }
 
 function renderStatus(status) {
+  statusFailureCount = 0;
+  if (!statusPollTimer) {
+    startStatusPolling();
+  }
   // 抓旧状态做边沿检测 —— 录制从在录 → 停止时,自动刷新录像列表
   const prevRecording = currentStatus ? currentStatus.recording : null;
   currentStatus = status;
@@ -276,9 +340,26 @@ function list_rows() {
 async function refreshStatus() {
   try {
     const status = await api("/api/status");
+    statusFailureCount = 0;
     renderStatus(status);
+    if (status.camera_status === "disconnected") {
+      statusDisconnectedCount += 1;
+      if (statusDisconnectedCount >= STATUS_MAX_DISCONNECTED) {
+        stopStatusPolling();
+        stopStreamRefresh();
+        toast("摄像头未连接，已停止自动刷新；请手动设置摄像头源", "red");
+      }
+    } else {
+      statusDisconnectedCount = 0;
+    }
   } catch (err) {
-    toast(err.message, "red");
+    statusFailureCount += 1;
+    if (statusFailureCount >= STATUS_MAX_FAILURES) {
+      stopStatusPolling();
+      toast("状态接口连续失败，已停止自动刷新；请手动调整摄像头源", "red");
+    } else {
+      toast(`${err.message}，正在重试 ${statusFailureCount}/${STATUS_MAX_FAILURES}`, "red");
+    }
   }
 }
 
@@ -290,7 +371,10 @@ async function switchMode(mode) {
       method: "POST",
       body: JSON.stringify({ mode, source }),
     });
-    els.stream.src = `/stream?t=${Date.now()}`;
+    resetStreamBackoff();
+    startStreamRefresh();
+    restartStream({ force: true });
+    statusDisconnectedCount = 0;
     renderStatus(status);
     toast("模式已切换", "green");
   } catch (err) {
@@ -426,7 +510,9 @@ async function boot() {
   modes = data.modes;
   renderModes(data.current);
   await refreshStatus();
-  window.setInterval(refreshStatus, 500);
+  if (statusFailureCount < STATUS_MAX_FAILURES) {
+    startStatusPolling();
+  }
   // 启动时拉一次录像列表,之后每 10s 兜底轮询一次
   // (处理"另一台客户端刚刚停止录制"等本机感知不到的状态变化)
   fetchRecordings();
@@ -455,6 +541,9 @@ els.applyCameraBtn.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ source }),
     });
+    statusDisconnectedCount = 0;
+    startStreamRefresh();
+    restartStream({ force: true });
     renderStatus(status);
     toast("摄像头源已应用", "green");
   } catch (err) {
@@ -465,6 +554,9 @@ els.applyCameraBtn.addEventListener("click", async () => {
 els.switchCameraBtn.addEventListener("click", async () => {
   try {
     const status = await api("/api/camera/switch", { method: "POST", body: "{}" });
+    statusDisconnectedCount = 0;
+    startStreamRefresh();
+    restartStream({ force: true });
     renderStatus(status);
     toast("摄像头已切换", "green");
   } catch (err) {
@@ -526,6 +618,12 @@ els.refreshRecordingsBtn.addEventListener("click", async () => {
   await fetchRecordings();
   toast("已刷新录像列表", "green");
 });
+
+els.stream.addEventListener("load", () => {
+  resetStreamBackoff();
+});
+els.stream.addEventListener("error", scheduleStreamReconnect);
+startStreamRefresh();
 
 syncBrowserCameraControls();
 boot().catch((err) => toast(err.message, "red"));

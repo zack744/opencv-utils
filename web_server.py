@@ -21,6 +21,8 @@ STATIC_DIR = ROOT / "web" / "static"
 DEVICES_CONFIG = ROOT / "config" / "devices.yaml"
 RECORDINGS_DIR = ROOT / "recordings"
 RECORDING_EXTS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
+STREAM_CONNECTION_SECONDS = 30.0
+STREAM_FRAME_INTERVAL = 0.05
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,7 +141,9 @@ class RuntimeManager:
 
     def status(self):
         with self._lock:
-            if self.runtime is None:
+            runtime = self.runtime
+            mode = self.mode
+            if runtime is None:
                 return {
                     "mode": None,
                     "state": "未启动",
@@ -150,10 +154,10 @@ class RuntimeManager:
                     "progress": 0,
                     "alert": False,
                 }
-            status = self.runtime.get_status_snapshot()
-            status["mode"] = self.mode
-            status["mode_label"] = MODES[self.mode]["label"]
-            return status
+        status = runtime.get_status_snapshot()
+        status["mode"] = mode
+        status["mode_label"] = MODES[mode]["label"]
+        return status
 
     def jpeg(self):
         with self._lock:
@@ -374,15 +378,24 @@ PLACEHOLDER_JPEG = _placeholder_jpeg()
 
 
 def mjpeg_stream():
-    while True:
-        frame = manager.jpeg() or PLACEHOLDER_JPEG
-        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-        time.sleep(0.05)
+    deadline = time.monotonic() + STREAM_CONNECTION_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            frame = manager.jpeg() or PLACEHOLDER_JPEG
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            time.sleep(STREAM_FRAME_INTERVAL)
+    except GeneratorExit:
+        return
 
 
 @app.get("/stream")
 def stream():
-    return Response(mjpeg_stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response = Response(mjpeg_stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Connection"] = "close"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 def parse_args():
